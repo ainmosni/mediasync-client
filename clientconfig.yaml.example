@@ -1,0 +1,6 @@
+remote: https://dl.example.org
+username: example
+password: example
+root_mapping:
+  - remote_path: /example
+    local_path: /some/nested/example
