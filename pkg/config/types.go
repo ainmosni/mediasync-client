@@ -17,13 +17,19 @@ limitations under the License.
 package config
 
 type Configuration struct {
-	Remote      string     `mapstructure:"remote"`
-	UserName    string     `mapstructure:"username"`
-	Password    string     `mapstructure:"password"`
-	RootMapping []FilePath `mapstructure:"root_mapping"`
+	Remote      string         `mapstructure:"remote"`
+	UserName    string         `mapstructure:"username"`
+	Password    string         `mapstructure:"password"`
+	RootMapping []FilePath     `mapstructure:"root_mapping"`
+	Telegram    TelegramConfig `mapstructure:"telegram"`
 }
 
 type FilePath struct {
 	RemotePath string `mapstructure:"remote_path"`
 	LocalPath  string `mapstructure:"local_path"`
+}
+
+type TelegramConfig struct {
+	Token  string `mapstructure:"token"`
+	ChatID int64  `mapstructure:"chat_id"`
 }

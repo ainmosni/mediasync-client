@@ -4,3 +4,6 @@ password: example
 root_mapping:
   - remote_path: /example
     local_path: /some/nested/example
+telegram:
+  token: token_goes_here
+  chat_id: chat_id_goes_here

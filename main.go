@@ -18,61 +18,97 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"log/syslog"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ainmosni/mediasync-client/pkg/config"
+	"github.com/ainmosni/mediasync-client/pkg/report"
+	"github.com/nightlyone/lockfile"
+)
+
+const (
+	lockFile = "/tmp/mediasync.lock"
+
+	postfixLen = 8
 )
 
 type wp struct {
 	WebPath string `json:"web_path"`
 }
 
-func getFiles(c *config.Configuration, logger *log.Logger) []wp {
-	fileInfo, err := url.Parse(c.Remote)
-	if err != nil {
-		logger.Fatalf("Can't parse remote: %s", err)
+func randomString(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
 	}
+	return fmt.Sprintf("%X", b), nil
+}
 
-	fileInfo.Path = path.Join(fileInfo.Path, "/fileinfo")
-
-	req, err := http.NewRequest("GET", fileInfo.String(), nil)
+func createURL(c *config.Configuration, rPath string) (*url.URL, error) {
+	u, err := url.Parse(c.Remote)
 	if err != nil {
-		logger.Fatalf("Bad request: %s", err)
+		return nil, err
+	}
+	u.Path = path.Join(u.Path, rPath)
+	return u, nil
+}
+
+func reqWithAuth(method, url string, c *config.Configuration) (*http.Response, error) {
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		return nil, err
 	}
 
 	req.SetBasicAuth(c.UserName, c.Password)
 
-	resp, err := http.DefaultClient.Do(req)
+	return http.DefaultClient.Do(req)
+}
 
+func getFiles(c *config.Configuration) ([]wp, error) {
+	fileInfo, err := createURL(c, "/fileinfo")
 	if err != nil {
-		logger.Fatalf("Failed to get fileinfo: %s", err)
+		return []wp{}, fmt.Errorf("can't parse remote: %w", err)
 	}
+
+	resp, err := reqWithAuth("GET", fileInfo.String(), c)
+	if err != nil {
+		return []wp{}, fmt.Errorf("failed to get fileinfo: %w", err)
+	}
+
 	defer resp.Body.Close()
 
 	buf := bytes.NewBuffer([]byte{})
 	_, err = io.Copy(buf, resp.Body)
 
 	if err != nil {
-		logger.Fatalf("failed to copy: %s", err)
+		return []wp{}, fmt.Errorf("failed to copy: %w", err)
 	}
 
 	var files []wp
 	err = json.Unmarshal(buf.Bytes(), &files)
 	if err != nil {
-		logger.Fatalf("Couldn't parse json: %s", err)
+		return []wp{}, fmt.Errorf("couldn't parse json: %w", err)
 	}
-	return files
+	return files, nil
+}
+
+func delFile(u fmt.Stringer, c *config.Configuration) error {
+	delResp, err := reqWithAuth("DELETE", u.String(), c)
+	if err != nil {
+		return fmt.Errorf("failed to delete %s: %s", u.String(), err)
+	}
+	defer delResp.Body.Close()
+
+	return nil
 }
 
 func findLocal(f string, c *config.Configuration) string {
@@ -85,80 +121,128 @@ func findLocal(f string, c *config.Configuration) string {
 	return localFile
 }
 
-func getFile(f wp, c *config.Configuration, logger *log.Logger) {
-	localFile := findLocal(f.WebPath, c)
-	if localFile == "" {
-		logger.Fatalf("Couldn't find config for remote file %s", f)
+func downloadFile(remote, local string, c *config.Configuration) error {
+	dir, fName := filepath.Split(local)
+	err := os.MkdirAll(dir, 0775)
+	if err != nil {
+		return fmt.Errorf("couldn't create dir: %w", err)
 	}
 
-	fileURL, err := url.Parse(c.Remote)
+	postfix, err := randomString(postfixLen)
 	if err != nil {
-		logger.Fatalf("Couldn't parse remote: %s", err)
+		return fmt.Errorf("couldn't generate postfix: %w", err)
 	}
 
-	fileURL.Path = path.Join(fileURL.Path, f.WebPath)
-
-	dir, _ := filepath.Split(localFile)
-	err = os.MkdirAll(dir, 0775)
+	tmpFile := path.Join(dir, fmt.Sprintf(".%s.%s", fName, postfix))
+	output, err := os.Create(tmpFile)
 	if err != nil {
-		logger.Fatalf("Couldn't create dir: %s", err)
+		return fmt.Errorf("couldn't create file: %w", err)
 	}
-	output, err := os.Create(localFile)
-	if err != nil {
-		logger.Fatalf("Couldn't create file: %s", err)
-	}
-	defer output.Close()
 
-	req, err := http.NewRequest("GET", fileURL.String(), nil)
-	if err != nil {
-		logger.Fatalf("Bad request: %s", err)
-	}
-	req.SetBasicAuth(c.UserName, c.Password)
+	defer func() {
+		_ = output.Close()
+		_, err := os.Stat(tmpFile)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return
+			}
+			panic(err)
+		}
+		os.Remove(tmpFile)
+	}()
 
-	start := time.Now()
-	logger.Printf("Downloading %s to %s.", fileURL.String(), localFile)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := reqWithAuth("GET", remote, c)
 	if err != nil {
-		logger.Fatalf("Couldn't download %s: %s", fileURL.String(), err)
+		return fmt.Errorf("couldn't download %s: %w", remote, err)
 	}
 	defer resp.Body.Close()
 
-	written, err := io.Copy(output, resp.Body)
+	_, err = io.Copy(output, resp.Body)
 	if err != nil {
-		logger.Fatalf("Failed downloading %s: %s", fileURL, err)
+		return fmt.Errorf("failed downloading %s: %w", remote, err)
 	}
-	end := time.Since(start)
-	secs := end.Seconds()
-	bps := float64(written) / secs
-
-	logger.Printf("Finished downloading %s in %f seconds (%f bps)", localFile, secs, bps)
-
-	delReq, err := http.NewRequest("DELETE", fileURL.String(), nil)
+	err = output.Close()
 	if err != nil {
-		logger.Fatalf("Bad request: %s", err)
+		return fmt.Errorf("failed to close %s: %w", tmpFile, err)
 	}
-	delReq.SetBasicAuth(c.UserName, c.Password)
-
-	delResp, err := http.DefaultClient.Do(delReq)
+	err = os.Rename(tmpFile, local)
 	if err != nil {
-		logger.Fatalf("Failed to delete %s: %s", fileURL.String(), err)
+		return fmt.Errorf("couldn't rename %s to %s: %v", tmpFile, local, err)
 	}
-	delResp.Body.Close()
+
+	return nil
+}
+
+func getFile(f wp, c *config.Configuration) error {
+	localFile := findLocal(f.WebPath, c)
+	if localFile == "" {
+		return fmt.Errorf("couldn't find config for remote file: %s", f)
+	}
+
+	fileURL, err := createURL(c, f.WebPath)
+	if err != nil {
+		return fmt.Errorf("couldn't parse remote: %s", err)
+	}
+
+	err = downloadFile(fileURL.String(), localFile, c)
+	if err != nil {
+		return err
+	}
+
+	err = delFile(fileURL, c)
+	return err
 }
 
 func main() {
-	logger, err := syslog.NewLogger(syslog.LOG_INFO, 0)
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+
+	lock, err := lockfile.New(lockFile)
 	if err != nil {
-		panic(fmt.Errorf("can't init logger: %s", err))
+		panic(err)
 	}
+
+	if err := lock.TryLock(); err != nil {
+		panic(fmt.Sprintf("Can't lock %q, reason %v", lock, err))
+	}
+
+	defer func() {
+		if err := lock.Unlock(); err != nil {
+			logger.Printf("Can't unlock %q, reason %v", lock, err)
+		}
+	}()
+
 	c, err := config.GetConfig()
 	if err != nil {
-		logger.Fatalf("Can't get configuration: %s", err)
+		logger.Printf("Can't get configuration: %s", err)
+		return
 	}
 
-	files := getFiles(c, logger)
+	r, err := report.New(c)
+	if err != nil {
+		logger.Printf("can't send telegram messages: %v", err)
+		return
+	}
+	defer func() {
+		err := r.SendReport()
+		if err != nil {
+			panic(err)
+		}
+	}()
+
+	files, err := getFiles(c)
+	if err != nil {
+		e := fmt.Errorf("couldn't get file list: %w", err)
+		r.AddError(e)
+		logger.Println(e)
+		return
+	}
 
 	for _, f := range files {
-		getFile(f, c, logger)
+		err := getFile(f, c)
+		if err != nil {
+			r.AddError(err)
+			continue
+		}
+		r.AddFile(path.Base(f.WebPath))
 	}
 }
