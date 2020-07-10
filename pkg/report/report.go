@@ -19,9 +19,14 @@ package report
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ainmosni/mediasync-client/pkg/config"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api"
+)
+
+const (
+	EscapeChars = "\\!\"#$%&'()*+,./:;<=>?@[]^_`{|}~-"
 )
 
 type Reporter struct {
@@ -29,6 +34,21 @@ type Reporter struct {
 	chatID     int64
 	downloaded []string
 	errors     []error
+}
+
+func needsEscape(r rune) bool {
+	return strings.ContainsAny(string(r), EscapeChars)
+}
+
+func escape(in string) string {
+	out := ""
+	for _, c := range in {
+		if needsEscape(c) {
+			out += "\\"
+		}
+		out += string(c)
+	}
+	return out
 }
 
 func New(c *config.Configuration) (*Reporter, error) {
@@ -63,14 +83,14 @@ func (r *Reporter) SendReport() error {
 	if len(r.downloaded) > 0 {
 		m += "\n*Files downloaded:*\n"
 		for _, f := range r.downloaded {
-			m += fmt.Sprintf("\\- %s\n", f)
+			m += fmt.Sprintf("\\- %s\n", escape(f))
 		}
 	}
 
 	if len(r.errors) > 0 {
 		m += "\n*Errors occurred:*\n"
 		for _, e := range r.errors {
-			m += fmt.Sprintf("\\- %v\n", e)
+			m += fmt.Sprintf("\\- %s\n", escape(e.Error()))
 		}
 	}
 
