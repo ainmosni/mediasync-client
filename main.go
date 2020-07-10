@@ -104,7 +104,7 @@ func getFiles(c *config.Configuration) ([]wp, error) {
 func delFile(u fmt.Stringer, c *config.Configuration) error {
 	delResp, err := reqWithAuth("DELETE", u.String(), c)
 	if err != nil {
-		return fmt.Errorf("failed to delete %s: %s", u.String(), err)
+		return fmt.Errorf("failed to delete %s: %w", u.String(), err)
 	}
 	defer delResp.Body.Close()
 
@@ -167,7 +167,7 @@ func downloadFile(remote, local string, c *config.Configuration) error {
 	}
 	err = os.Rename(tmpFile, local)
 	if err != nil {
-		return fmt.Errorf("couldn't rename %s to %s: %v", tmpFile, local, err)
+		return fmt.Errorf("couldn't rename %s to %s: %w", tmpFile, local, err)
 	}
 
 	return nil
@@ -181,7 +181,7 @@ func getFile(f wp, c *config.Configuration) error {
 
 	fileURL, err := createURL(c, f.WebPath)
 	if err != nil {
-		return fmt.Errorf("couldn't parse remote: %s", err)
+		return fmt.Errorf("couldn't parse remote: %w", err)
 	}
 
 	err = downloadFile(fileURL.String(), localFile, c)
